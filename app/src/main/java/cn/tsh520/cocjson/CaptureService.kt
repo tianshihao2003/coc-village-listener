@@ -50,6 +50,7 @@ class CaptureService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var lastFingerprint: String? = null
     private var lastDescHash: String? = null
+    private var lastClipCount = -1
     private var svc: cn.tsh520.cocjson.service.IClipboardUserService? = null
 
     private val prefs by lazy { getSharedPreferences("config", MODE_PRIVATE) }
@@ -104,7 +105,26 @@ class CaptureService : Service() {
             }
             val hash = runCatching { svcBound.detectChange() }.getOrNull() ?: "NO_DESC"
             if (hash == "NO_DESC") {
-                lastPollNote = "无法读取剪贴板元信息"
+                // 通道三：系统剪贴板变化回调计数（Android 16 主力通道）
+                val cnt = runCatching { svcBound.clipChangeCount() }.getOrDefault(-1)
+                if (cnt < 0) {
+                    lastPollNote = "剪贴板元信息与回调通道均不可用"
+                    continue
+                }
+                if (lastClipCount == -1) {
+                    lastClipCount = cnt
+                    lastPollNote = "已注册系统复制回调（计数 $cnt），请复制一次村庄数据"
+                    continue
+                }
+                if (cnt == lastClipCount) {
+                    lastPollNote = "等待复制…（回调计数 $cnt）"
+                    continue
+                }
+                lastClipCount = cnt
+                lastPollNote = "检测到复制动作（计数 $cnt）→ 已拉起目标软件"
+                notifyClipChange()
+                val target3 = TargetAppStore.target(this)
+                if (target3 != null) runCatching { TargetAppLauncher.launch(this, target3.first) }
                 continue
             }
             if (hash == lastDescHash) {
@@ -164,13 +184,24 @@ class CaptureService : Service() {
         )
     }
 
-    private fun monitorNotification(): Notification =
-        NotificationCompat.Builder(this, CHANNEL_MONITOR)
+    private fun monitorNotification(): Notification {
+        val builder = NotificationCompat.Builder(this, CHANNEL_MONITOR)
             .setSmallIcon(android.R.drawable.ic_menu_view)
             .setContentTitle("村庄数据监听中")
             .setContentText("检测到复制村庄JSON后会自动打开目标软件")
             .setOngoing(true)
-            .build()
+        val target = TargetAppStore.target(this)
+        if (target != null) {
+            val launchIntent = packageManager.getLaunchIntentForPackage(target.first)
+            if (launchIntent != null) {
+                val pi = PendingIntent.getActivity(this, 2001,
+                    launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+                builder.addAction(0, "打开${target.second}", pi)
+            }
+        }
+        return builder.build()
+    }
 
     private fun notifyCapture(tag: String, target: Pair<String, String>?) {        val nm = getSystemService(NotificationManager::class.java)
         val contentText = if (target != null) "已存档，正在打开 ${target.second}"

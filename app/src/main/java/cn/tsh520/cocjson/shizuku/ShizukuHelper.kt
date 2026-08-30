@@ -11,7 +11,7 @@ import rikka.shizuku.Shizuku
 object ShizukuHelper {
     const val REQUEST_CODE = 10001
     /** UserService 实现变更时必须递增，Shizuku 才会重启该进程 */
-    private const val USER_SERVICE_VERSION = 5
+    private const val USER_SERVICE_VERSION = 6
     private var connection: ServiceConnection? = null
     private var deadListener: Shizuku.OnBinderDeadListener? = null
 

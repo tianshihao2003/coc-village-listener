@@ -142,27 +142,77 @@ class ClipboardUserService : IClipboardUserService.Stub() {
                 } finally { data.recycle(); reply.recycle() }
             }
         }
-        for (c in combos()) {
-            val result = runCatching {
-                val pb = ProcessBuilder(listOf("service", "call", "clipboard", c.code.toString()) + c.args)
-                pb.redirectErrorStream(true)
-                val p = pb.start()
-                val out = p.inputStream.bufferedReader().use { it.readText() }
-                p.waitFor()
-                val json = extractJsonFromParcelDump(out)
-                if (json != null) "✓JSON(${json.length}字符)"
-                else if (out.contains("Parcel(")) "非JSON(" + out.replace(Regex("\\s+"), " ").take(50) + ")"
-                else out.replace(Regex("\\s+"), " ").take(50)
-            }.getOrElse { it.javaClass.simpleName }
-            sb.append("sc(code=${c.code},${c.args.size / 2}参): ").append(result).append('\n')
-        }
-        lockedCombo?.let { sb.append("已锁定: code=${it.code} ${it.args.size / 2}参\n") }
+        // listener 状态 + dumpsys（服务端视角的剪贴板实况）
+        val binder2 = clipboardBinder
+        if (binder2 != null) ensureListenerRegistered(binder2)
+        sb.append("listener已注册=").append(listenerRegistered)
+            .append(" 回调次数=").append(clipChanges.get()).append('\n')
         try {
-            sb.append("logcat剪贴板相关:\n").append(logcatClips())
+            val pb = ProcessBuilder("dumpsys", "clipboard")
+            pb.redirectErrorStream(true)
+            val p = pb.start()
+            val out = p.inputStream.bufferedReader().use { it.readText() }
+            p.waitFor()
+            val lines = out.lineSequence()
+                .filter { it.isNotBlank() }
+                .filterNot { it.contains("ThreadPool max thread", true) }
+                .take(14)
+                .joinToString("\n")
+            sb.append("dumpsys clipboard:\n").append(lines.ifEmpty { "(无输出)" })
         } catch (t: Throwable) {
-            sb.append("logcat: ${t.javaClass.simpleName}")
+            sb.append("dumpsys: ${t.javaClass.simpleName}")
         }
         return sb.toString()
+    }
+
+    // ---------- 通道三：系统剪贴板变化回调（code 5 注册 listener） ----------
+
+    private val clipChanges = java.util.concurrent.atomic.AtomicInteger(0)
+    @Volatile private var listenerRegistered = false
+
+    /** IOnPrimaryClipChangedListener 的最小实现：oneway void onPrimaryClipChanged() = 事务码 1 */
+    private val clipListenerBinder = object : android.os.Binder() {
+        override fun onTransact(code: Int, data: Parcel, reply: Parcel?, flags: Int): Boolean {
+            if (code == 1) { clipChanges.incrementAndGet(); return true }
+            return false
+        }
+    }
+
+    /**
+     * 向系统剪贴板服务注册变化监听。参数布局探测：
+     * (listener, pkg, userId) / (listener, pkg, userId, deviceId) 等；成功后服务端会在每次复制时回调。
+     */
+    private fun ensureListenerRegistered(binder: IBinder) {
+        if (listenerRegistered) return
+        val layouts: List<List<Int>> = listOf(
+            // [listener, pkg字符串数, 尾随int个数] —— 依版本 (attr/userId/deviceId) 组合不同
+            listOf(1, 1, 1), // listener + pkg + userId
+            listOf(1, 2, 2), // listener + pkg + attr + userId + deviceId
+            listOf(1, 2, 1), // listener + pkg + attr + userId
+            listOf(1, 1, 2), // listener + pkg + userId + deviceId
+        )
+        for (l in layouts) {
+            val data = Parcel.obtain()
+            val reply = Parcel.obtain()
+            try {
+                data.writeInterfaceToken(DESCRIPTOR)
+                data.writeStrongBinder(clipListenerBinder)
+                repeat(l[1]) { data.writeString(PKG) }
+                repeat(l[2]) { data.writeInt(0) }
+                val ok = binder.transact(TRANSACTION_ADD_LISTENER, data, reply, 0)
+                reply.readException()
+                if (ok) { listenerRegistered = true; lastError = "无（listener 布局 $l）"; return }
+            } catch (t: Throwable) {
+                // 换下一个布局
+            } finally { data.recycle(); reply.recycle() }
+        }
+        lastError = "listener 注册失败（全部布局）"
+    }
+
+    override fun clipChangeCount(): Int {
+        val binder = clipboardBinder ?: return -1
+        ensureListenerRegistered(binder)
+        return if (listenerRegistered) clipChanges.get() else -1
     }
 
     private fun logcatClips(): String = runCatching {
@@ -297,6 +347,7 @@ class ClipboardUserService : IClipboardUserService.Stub() {
     private companion object {
         const val DESCRIPTOR = "android.content.IClipboard"
         const val TRANSACTION_GET_PRIMARY_CLIP = 2
+        const val TRANSACTION_ADD_LISTENER = 5 // addPrimaryClipChangedListener
         const val PKG = "com.android.shell"
         const val JSON_START = "{\"tag\""
         const val BIG_PARCEL_MARK = "above allowed limit"
