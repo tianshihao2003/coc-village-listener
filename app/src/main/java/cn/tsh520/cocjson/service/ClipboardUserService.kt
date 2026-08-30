@@ -142,6 +142,21 @@ class ClipboardUserService : IClipboardUserService.Stub() {
                 } finally { data.recycle(); reply.recycle() }
             }
         }
+        for (c in combos()) {
+            val result = runCatching {
+                val pb = ProcessBuilder(listOf("service", "call", "clipboard", c.code.toString()) + c.args)
+                pb.redirectErrorStream(true)
+                val p = pb.start()
+                val out = p.inputStream.bufferedReader().use { it.readText() }
+                p.waitFor()
+                val json = extractJsonFromParcelDump(out)
+                if (json != null) "✓JSON(${json.length}字符)"
+                else if (out.contains("Parcel(")) "非JSON(" + out.replace(Regex("\\s+"), " ").take(50) + ")"
+                else out.replace(Regex("\\s+"), " ").take(50)
+            }.getOrElse { it.javaClass.simpleName }
+            sb.append("sc(code=${c.code},${c.args.size / 2}参): ").append(result).append('\n')
+        }
+        lockedCombo?.let { sb.append("已锁定: code=${it.code} ${it.args.size / 2}参\n") }
         try {
             sb.append("logcat剪贴板相关:\n").append(logcatClips())
         } catch (t: Throwable) {
@@ -200,20 +215,46 @@ class ClipboardUserService : IClipboardUserService.Stub() {
         item.getText()?.toString() ?: item.coerceToText(null)?.toString()
     } catch (t: Throwable) { null }
 
-    // ---------- 备用通道：service call ----------
+    // ---------- 备用通道：service call 穷举探测 ----------
 
-    private fun serviceCallRead(): String? = serviceCallRaw()?.let { extractJsonFromParcelDump(it) }
+    private data class CallCombo(val code: Int, val args: List<String>)
 
-    private fun serviceCallRaw(): String? = runCatching {
-        val pb = ProcessBuilder(
-            "service", "call", "clipboard", "2",
-            "s16", PKG, "s16", PKG, "i32", "0", "i32", "0",
-        )
+    @Volatile private var lockedCombo: CallCombo? = null
+
+    /** 主探测清单：code 2（getPrimaryClip）与 code 8（16 上另一个返回大对象的方法）× 各种参数布局 */
+    private fun combos(): List<CallCombo> = listOf(
+        CallCombo(2, listOf("s16", PKG, "s16", PKG, "i32", "0", "i32", "0")),
+        CallCombo(2, listOf("s16", PKG, "s16", PKG, "i32", "0")),
+        CallCombo(2, listOf("s16", PKG, "i32", "0")),
+        CallCombo(2, listOf("s16", PKG, "s16", PKG, "s16", PKG, "i32", "0", "i32", "0")),
+        CallCombo(2, listOf("s16", PKG)),
+        CallCombo(8, listOf("s16", PKG, "s16", PKG, "i32", "0", "i32", "0")),
+        CallCombo(8, listOf("s16", PKG, "s16", PKG, "i32", "0")),
+        CallCombo(8, listOf("s16", PKG, "i32", "0")),
+    )
+
+    /** 穷举组合直到某个输出的 parcel dump 里能还原出 JSON；成功即锁定组合 */
+    private fun serviceCallRead(): String? {
+        lockedCombo?.let { return runCombo(it) }
+        for (c in combos()) {
+            val json = runCombo(c)
+            if (!json.isNullOrEmpty()) {
+                lockedCombo = c
+                lastError = "无（service call 锁定 code=${c.code} ${c.args.size / 2}参）"
+                return json
+            }
+        }
+        lastError = "service call 全部组合均未还原出 JSON"
+        return null
+    }
+
+    private fun runCombo(c: CallCombo): String? = runCatching {
+        val pb = ProcessBuilder(listOf("service", "call", "clipboard", c.code.toString()) + c.args)
         pb.redirectErrorStream(true)
         val p = pb.start()
         val out = p.inputStream.bufferedReader().use { it.readText() }
         p.waitFor()
-        out.takeIf { it.contains("Parcel(") }
+        extractJsonFromParcelDump(out)
     }.getOrNull()
 
     private fun extractJsonFromParcelDump(dump: String): String? {
