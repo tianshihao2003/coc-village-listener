@@ -50,7 +50,7 @@ object ShizukuHelper {
     }
 
     fun unbindUserService() {
-        connection?.let { runCatching { Shizuku.unbindUserService(args(), it) } }
+        connection?.let { runCatching { Shizuku.unbindUserService(args(), it, true) } }
         connection = null
     }
 

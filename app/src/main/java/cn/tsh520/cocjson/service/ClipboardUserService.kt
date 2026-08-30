@@ -24,8 +24,6 @@ class ClipboardUserService : IClipboardUserService.Stub() {
 
     @Volatile private var lockedMode: Int = -1
 
-    override fun version(): String = "1.0"
-
     override fun modeInfo(): String =
         "lockedMode=$lockedMode sdk=${Build.VERSION.SDK_INT} binder=${clipboardBinder != null}"
 
