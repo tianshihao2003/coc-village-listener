@@ -1,19 +1,21 @@
 package cn.tsh520.cocjson.service
 
-import android.content.ClipDescription
 import android.content.ClipData
+import android.content.ClipDescription
 import android.os.Build
 import android.os.IBinder
 import android.os.Parcel
 import org.lsposed.hiddenapibypass.HiddenApiBypass
+import java.security.MessageDigest
 
 /**
  * 运行在 shell 身份的 Shizuku UserService 进程。
- * 主通道：裸 binder transact 调系统 IClipboard.getPrimaryClip（transaction code 2，
- * descriptor "android.content.IClipboard"），参数签名跨版本漂移用"候选列表探测"消化。
- * 备用通道：shell 身份执行 `service call clipboard` 并从 Parcel dump 还原文本。
- * shell 身份不受 Android 10+ 应用剪贴板限制，但 binder 单次 reply 有 1MB 上限：
- * 超大剪贴板内容会在读取时报 BadParcelableException（诊断可见）。
+ *
+ * 背景：游戏"数据导出"的村庄 JSON 可达数 MB，而安卓 binder 单次回传有 1MB 上限，
+ * 全文读取（getPrimaryClip，code 2）会报 BadParcelableException。因此：
+ * - 主检测通道：getPrimaryClipDescription（元信息，极小，不受限），指纹变化即视为剪贴板更新；
+ * - 全文通道保留：内容较小时可读出并做 JSON 校验与存档。
+ * 所有事务的参数签名与 code 均按候选矩阵探测，天然抗版本漂移。
  */
 class ClipboardUserService : IClipboardUserService.Stub() {
 
@@ -34,7 +36,6 @@ class ClipboardUserService : IClipboardUserService.Stub() {
     override fun readClipboard(): String? {
         val binder = clipboardBinder
         if (binder != null) {
-            // 先试已锁定的模式，再按序探测其余候选
             val modes = if (lockedMode >= 0) listOf(lockedMode) + (candidates().keys - lockedMode)
                         else candidates().keys.sorted()
             for (mode in modes) {
@@ -46,7 +47,6 @@ class ClipboardUserService : IClipboardUserService.Stub() {
                     return text
                 }
                 if (clip != null) {
-                    // transact 成功只是剪贴板无文本：这不算探测失败，锁定该模式
                     if (lockedMode != mode) lockedMode = mode
                     lastError = "剪贴板无文本"
                     return null
@@ -57,8 +57,39 @@ class ClipboardUserService : IClipboardUserService.Stub() {
         } else {
             lastError = "clipboard binder 不存在"
         }
-        // 备用通道（同样受 1MB 限制，超限时 extract 会失败）
         return serviceCallRead()?.also { lastError = "无（service call 通道）" }
+    }
+
+    override fun detectChange(): String {
+        val binder = clipboardBinder ?: return "NO_DESC"
+        // 扫描候选 code（3~6 中必有一个是 getPrimaryClipDescription）× 参数布局
+        for (code in DESC_CODE_CANDIDATES) {
+            for ((_, writer) in candidates()) {
+                val data = Parcel.obtain()
+                val reply = Parcel.obtain()
+                try {
+                    data.writeInterfaceToken(DESCRIPTOR)
+                    writer.invoke(data)
+                    binder.transact(code, data, reply, 0)
+                    reply.readException()
+                    val desc = if (Build.VERSION.SDK_INT >= 30) reply.readTypedObject(ClipDescription.CREATOR)
+                               else if (reply.readInt() != 0) ClipDescription.CREATOR.createFromParcel(reply) else null
+                    if (desc != null) {
+                        val mimes = (0 until desc.mimeTypeCount).joinToString(",") { desc.getMimeType(it) }
+                        val extra = runCatching { desc.extras?.toString() ?: "" }.getOrDefault("")
+                        val identity = "code=$code label=${desc.label ?: ""} mime=$mimes extra=$extra"
+                        val fp = MessageDigest.getInstance("SHA-256").digest(identity.toByteArray())
+                            .joinToString("") { "%02x".format(it) }.take(16)
+                        lastError = "无（desc code=$code）"
+                        return fp
+                    }
+                } catch (t: Throwable) {
+                    // 换下一个候选
+                } finally { data.recycle(); reply.recycle() }
+            }
+        }
+        lastError = "描述通道全部候选失败"
+        return "NO_DESC"
     }
 
     override fun diagnose(): String {
@@ -67,7 +98,32 @@ class ClipboardUserService : IClipboardUserService.Stub() {
         if (binder == null) {
             sb.append("clipboard binder 不存在（ServiceManager 反射失败）\n")
         } else {
-            // 先读"描述"（不含内容，不受 1MB 限制）：确认剪贴板里装的是什么
+            // 矩阵摸底：code 3~8 × 参数布局，把 16 的接口全景探出来
+            for (code in 3..8) {
+                val results = StringBuilder()
+                for (layout in candidates().keys.sorted()) {
+                    val data = Parcel.obtain()
+                    val reply = Parcel.obtain()
+                    try {
+                        data.writeInterfaceToken(DESCRIPTOR)
+                        candidates().getValue(layout).invoke(data)
+                        binder.transact(code, data, reply, 0)
+                        reply.readException()
+                        val clipDesc = runCatching {
+                            if (Build.VERSION.SDK_INT >= 30) reply.readTypedObject(ClipDescription.CREATOR) else null
+                        }.getOrNull()
+                        if (clipDesc != null) {
+                            results.append("布局$layout=ClipDescription(${clipDesc.label ?: ""}) ")
+                        } else {
+                            val dataPos = runCatching { reply.dataPosition() }.getOrDefault(-1)
+                            results.append("布局$layout=非描述(dataPos=$dataPos) ")
+                        }
+                    } catch (t: Throwable) {
+                        results.append("布局$layout=${t.javaClass.simpleName} ")
+                    } finally { data.recycle(); reply.recycle() }
+                }
+                sb.append("code=$code: ").append(results).append('\n')
+            }
             sb.append(readDescriptionDiag(binder)).append('\n')
             for ((mode, writer) in candidates()) {
                 val data = Parcel.obtain()
@@ -80,53 +136,40 @@ class ClipboardUserService : IClipboardUserService.Stub() {
                     val clip = if (Build.VERSION.SDK_INT >= 30) reply.readTypedObject(ClipData.CREATOR)
                                else if (reply.readInt() != 0) ClipData.CREATOR.createFromParcel(reply) else null
                     val text = clip?.let { clipToText(it) }
-                    sb.append("直调mode=$mode: 成功 textLen=${text?.length ?: -1}\n")
+                    sb.append("全文mode=$mode: 成功 textLen=${text?.length ?: -1}\n")
                 } catch (t: Throwable) {
-                    sb.append("直调mode=$mode: ${t.javaClass.simpleName}: ${t.message?.take(150)}\n")
+                    sb.append("全文mode=$mode: ${t.javaClass.simpleName}: ${t.message?.take(120)}\n")
                 } finally { data.recycle(); reply.recycle() }
             }
         }
         try {
-            val raw = serviceCallRaw()
-            sb.append("serviceCall: ").append(raw?.take(200) ?: "(无输出)")
+            sb.append("logcat剪贴板相关:\n").append(logcatClips())
         } catch (t: Throwable) {
-            sb.append("serviceCall: ${t.javaClass.simpleName}: ${t.message?.take(150)}")
+            sb.append("logcat: ${t.javaClass.simpleName}")
         }
         return sb.toString()
     }
 
-    /** getPrimaryClipDescription（transaction 3）：返回剪贴板元信息，不携带内容体 */
+    private fun logcatClips(): String = runCatching {
+        val pb = ProcessBuilder("logcat", "-d", "-t", "300")
+        pb.redirectErrorStream(true)
+        val p = pb.start()
+        val text = p.inputStream.bufferedReader().readText()
+        p.waitFor()
+        text.lineSequence().filter { it.contains("clip", true) }.take(8).joinToString("\n").ifEmpty { "(无相关日志)" }
+    }.getOrDefault("(读取失败)")
+
     private fun readDescriptionDiag(binder: IBinder): String {
-        val modes = if (lockedMode >= 0) listOf(lockedMode) + (candidates().keys - lockedMode)
-                    else candidates().keys.sorted()
-        for (mode in modes) {
-            val data = Parcel.obtain()
-            val reply = Parcel.obtain()
-            try {
-                data.writeInterfaceToken(DESCRIPTOR)
-                candidates().getValue(mode).invoke(data)
-                binder.transact(TRANSACTION_GET_PRIMARY_CLIP_DESC, data, reply, 0)
-                reply.readException()
-                val desc = if (Build.VERSION.SDK_INT >= 30) reply.readTypedObject(ClipDescription.CREATOR)
-                           else if (reply.readInt() != 0) ClipDescription.CREATOR.createFromParcel(reply) else null
-                if (desc != null) {
-                    val mimes = (0 until desc.mimeTypeCount).joinToString(",") { desc.getMimeType(it) }
-                    val extra = runCatching { desc.extras?.toString() ?: "" }.getOrDefault("")
-                    return "描述mode=$mode: label=${desc.label?.take(40)} mime=$mimes extra=${extra.take(120)}"
-                }
-            } catch (t: Throwable) {
-                // 换下一个模式继续
-            } finally { data.recycle(); reply.recycle() }
-        }
-        return "描述: 所有模式均未取得（可能被拒或签名不符）"
+        val result = detectChange()
+        return if (result == "NO_DESC") "描述: 所有候选均未取得"
+               else "描述指纹: $result（detectChange 可用）"
     }
 
     override fun destroy() { /* Shizuku UserService 规范要求的空实现 */ }
 
     /**
-     * 候选参数组合：key 为模式编号，value 为参数写入器。
-     * 4参 (pkg, attribution, userId, deviceId) — Android 15+（两枚 int 均传 0，
-     *     因此 deviceId/userId 顺序互换时 payload 相同，无需重复候选）
+     * 参数布局候选：key 为模式编号，value 为参数写入器。
+     * 4参 (pkg, attribution, userId, deviceId) — Android 15+（两枚 int 均传 0）
      * 3参 (pkg, attribution, userId)          — Android 12~14
      * 2参 (pkg, userId)                       — Android 10~11
      */
@@ -159,7 +202,6 @@ class ClipboardUserService : IClipboardUserService.Stub() {
 
     // ---------- 备用通道：service call ----------
 
-    /** 执行 service call 并直接还原出 JSON 文本（成功）；失败返回 null */
     private fun serviceCallRead(): String? = serviceCallRaw()?.let { extractJsonFromParcelDump(it) }
 
     private fun serviceCallRaw(): String? = runCatching {
@@ -174,13 +216,6 @@ class ClipboardUserService : IClipboardUserService.Stub() {
         out.takeIf { it.contains("Parcel(") }
     }.getOrNull()
 
-    /**
-     * `service call` 输出形如：
-     * Result: Parcel(
-     *   0x00000000: 00000000 00000001 '........  ....'
-     * 从 hex 列重组 parcel 字节流（每个 word 为 32 位小端），整体按 UTF-16LE 解码，
-     * 再从中截取平衡的 {"tag":...} JSON 对象。
-     */
     private fun extractJsonFromParcelDump(dump: String): String? {
         val bytes = ArrayList<Byte>(2048)
         for (line in dump.lineSequence()) {
@@ -220,11 +255,12 @@ class ClipboardUserService : IClipboardUserService.Stub() {
 
     private companion object {
         const val DESCRIPTOR = "android.content.IClipboard"
-        const val TRANSACTION_GET_PRIMARY_CLIP = 2 // FIRST_CALL_TRANSACTION + 1
-        const val TRANSACTION_GET_PRIMARY_CLIP_DESC = 3
-        const val PKG = "com.android.shell" // shell uid 下被系统放行的调用方标识
+        const val TRANSACTION_GET_PRIMARY_CLIP = 2
+        const val PKG = "com.android.shell"
         const val JSON_START = "{\"tag\""
         const val BIG_PARCEL_MARK = "above allowed limit"
         val WORD_RE = Regex("""[0-9a-fA-F]{8}""")
+        /** getPrimaryClipDescription 的事务 code 候选（不同版本可能插方法移位） */
+        val DESC_CODE_CANDIDATES = 3..6
     }
 }

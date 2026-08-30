@@ -49,6 +49,7 @@ class CaptureService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var lastFingerprint: String? = null
+    private var lastDescHash: String? = null
     private var svc: cn.tsh520.cocjson.service.IClipboardUserService? = null
 
     private val prefs by lazy { getSharedPreferences("config", MODE_PRIVATE) }
@@ -77,27 +78,59 @@ class CaptureService : Service() {
         while (scope.isActive) {
             delay(POLL_MS)
             lastPollAt = System.currentTimeMillis()
+
+            // 通道一：全文可读（内容较小时）→ 精确 JSON 校验 + 存档
             val raw = readViaShizuku()
-            if (raw == null) {
-                lastPollNote = "本轮未读到（Shizuku 未授权或读取失败）"
+            if (raw != null) {
+                val snap = JsonMatcher.match(raw)
+                if (snap == null) {
+                    lastPollNote = "读到 ${raw.length} 字符非村庄数据"
+                    continue
+                }
+                val fp = JsonMatcher.fingerprint(snap.raw)
+                if (fp == lastFingerprint) { lastPollNote = "已捕获过 ${snap.tag}"; continue }
+                lastFingerprint = fp
+                lastPollNote = "捕获 ${snap.tag}（${snap.raw.length} 字符）"
+                handleCapture(snap)
                 continue
             }
-            val snap = JsonMatcher.match(raw)
-            if (snap == null) {
-                lastPollNote = "读到 ${raw.length} 字符非村庄数据"
+
+            // 通道二：内容超 1MB 读不出全文（游戏导出 7MB+ 的场景）
+            // → 改用剪贴板元信息指纹变化检测，变化即拉起目标应用
+            val svcBound = ensureSvc()
+            if (svcBound == null) {
+                lastPollNote = "本轮未读到（Shizuku 未授权或绑定失败）"
                 continue
             }
-            val fp = JsonMatcher.fingerprint(snap.raw)
-            if (fp == lastFingerprint) { lastPollNote = "已捕获过 ${snap.tag}"; continue }
-            lastFingerprint = fp
-            lastPollNote = "捕获 ${snap.tag}（${snap.raw.length} 字符）"
-            handleCapture(snap)
+            val hash = runCatching { svcBound.detectChange() }.getOrNull() ?: "NO_DESC"
+            if (hash == "NO_DESC") {
+                lastPollNote = "无法读取剪贴板元信息"
+                continue
+            }
+            if (hash == lastDescHash) {
+                lastPollNote = "剪贴板未变化（元信息指纹 $hash）"
+                continue
+            }
+            val isFirst = lastDescHash == null
+            lastDescHash = hash
+            lastPollNote = if (isFirst) "开始跟踪剪贴板（指纹 $hash）"
+                           else "检测到剪贴板更新（指纹 $hash）→ 已拉起目标软件"
+            if (!isFirst || prefs.getBoolean("open_on_start", true)) {
+                notifyClipChange()
+                val target = TargetAppStore.target(this)
+                if (target != null) runCatching { TargetAppLauncher.launch(this, target.first) }
+            }
         }
     }
 
-    private suspend fun readViaShizuku(): String? {
+    private suspend fun ensureSvc(): cn.tsh520.cocjson.service.IClipboardUserService? {
+        svc?.let { return it }
         if (!ShizukuHelper.granted()) return null
-        val bound = svc ?: bindSuspend()?.also { svc = it } ?: return null
+        return bindSuspend()?.also { svc = it }
+    }
+
+    private suspend fun readViaShizuku(): String? {
+        val bound = ensureSvc() ?: return null
         return runCatching { bound.readClipboard() }.getOrNull()
     }
 
@@ -139,8 +172,7 @@ class CaptureService : Service() {
             .setOngoing(true)
             .build()
 
-    private fun notifyCapture(tag: String, target: Pair<String, String>?) {
-        val nm = getSystemService(NotificationManager::class.java)
+    private fun notifyCapture(tag: String, target: Pair<String, String>?) {        val nm = getSystemService(NotificationManager::class.java)
         val contentText = if (target != null) "已存档，正在打开 ${target.second}"
                           else "已存档（尚未选择要自动打开的软件）"
         val fallbackIntent = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java),
@@ -159,5 +191,28 @@ class CaptureService : Service() {
             .setContentIntent(pending)
             .build()
         runCatching { nm.notify(tag, tag.hashCode(), notification) }
+    }
+
+    private fun notifyClipChange() {
+        val nm = getSystemService(NotificationManager::class.java)
+        val target = TargetAppStore.target(this)
+        val launchIntent = target?.let { packageManager.getLaunchIntentForPackage(it.first) }
+        val pending = if (launchIntent != null) {
+            PendingIntent.getActivity(this, 1001,
+                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        } else {
+            PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        }
+        val notification = NotificationCompat.Builder(this, CHANNEL_CAPTURE)
+            .setSmallIcon(android.R.drawable.ic_menu_send)
+            .setContentTitle("检测到剪贴板更新")
+            .setContentText(if (target != null) "正在打开 ${target.second}，请在其中粘贴/导入"
+                            else "尚未选择要自动打开的软件")
+            .setAutoCancel(true)
+            .setContentIntent(pending)
+            .build()
+        runCatching { nm.notify("clip_change", 1001, notification) }
     }
 }
