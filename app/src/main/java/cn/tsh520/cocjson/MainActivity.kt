@@ -87,12 +87,8 @@ class MainActivity : AppCompatActivity() {
         if (!ShizukuHelper.granted()) { diagnoseResult.text = "请先激活并授权 Shizuku"; return }
         ShizukuHelper.bindUserService(
             onReady = { svc ->
-                val text = runCatching { svc.readClipboard() }
-                val info = runCatching { svc.modeInfo() }.getOrDefault("?")
-                diagnoseResult.text = text.fold(
-                    onSuccess = { t -> (t?.take(300) ?: "(剪贴板为空)") + "\n\n[$info]" },
-                    onFailure = { "读取失败: ${it.message}\n[$info]" }
-                )
+                val report = runCatching { svc.diagnose() }.getOrElse { "诊断失败: ${it.message}" }
+                diagnoseResult.text = "提示：诊断前先随便复制一段文字（如聊天消息），再点本按钮。\n\n$report"
             },
             onFail = { diagnoseResult.text = "绑定失败: $it" }
         )
