@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="match_parent">
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:orientation="vertical" android:padding="20dp">
+
+        <TextView android:id="@+id/shizuku_status" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:textSize="16sp" android:text="Shizuku 状态检查中…" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/switch_monitor" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:layout_marginTop="16dp" android:text="开启监听" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/switch_archive" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:layout_marginTop="8dp" android:text="自动存档到 下载/村庄JSON" />
+
+        <TextView android:id="@+id/target_info" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:layout_marginTop="24dp" android:textSize="16sp"
+            android:text="自动打开：未设置" />
+
+        <Button android:id="@+id/btn_pick" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:layout_marginTop="8dp" android:text="选择要自动打开的软件" />
+
+        <Button android:id="@+id/btn_guide" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:layout_marginTop="8dp" android:text="激活引导（首次必看）" />
+
+        <Button android:id="@+id/btn_diagnose" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:layout_marginTop="8dp" android:text="剪贴板诊断（测试读取）" />
+
+        <TextView android:id="@+id/diagnose_result" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:layout_marginTop="16dp"
+            android:textIsSelectable="true" android:textSize="13sp" />
+    </LinearLayout>
+</ScrollView>

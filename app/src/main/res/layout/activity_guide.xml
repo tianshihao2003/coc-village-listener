@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="match_parent">
+    <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:padding="20dp" android:textSize="15sp" android:lineSpacingMultiplier="1.4"
+        android:textIsSelectable="true"
+        android:text="本应用靠 Shizuku 获得系统级剪贴板读取能力（安卓系统限制，任何应用都无法绕过这一步）。\n\n一、安装 Shizuku\n1. 手机浏览器打开 shizuku.rikka.app 下载安装；\n2. 或在酷安/Google Play 搜索 Shizuku。\n\n二、激活 Shizuku（免电脑）\n1. 设置 → 系统管理 → 开发者选项 → 打开「无线调试」；\n2. 打开 Shizuku 应用，选「通过无线调试启动」，按提示输入配对码；\n3. Shizuku 显示「运行中」即成功。\n\n三、回到本应用\n点「开启监听」，允许 Shizuku 权限弹窗。\n\n四、vivo 保活设置（重要）\n1. 设置 → 电池 → 后台耗电管理 → 本应用 → 允许后台高耗电；\n2. 最近任务界面，按住本应用卡片下拉出现锁图标；\n3. i管家 → 应用管理 → 自启动 → 允许本应用。\n\n注意：手机重启后 Shizuku 需重新激活（重复第二步，约30秒），本应用会通知提醒你。" />
+</ScrollView>
