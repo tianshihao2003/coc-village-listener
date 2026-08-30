@@ -145,6 +145,6 @@ class CaptureService : Service() {
             .setAutoCancel(true)
             .setContentIntent(pending)
             .build()
-        runCatching { nm.notify(tag, notification) }
+        runCatching { nm.notify(tag, tag.hashCode(), notification) }
     }
 }
