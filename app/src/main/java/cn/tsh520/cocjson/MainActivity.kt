@@ -5,6 +5,8 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
@@ -14,6 +16,9 @@ import androidx.core.content.ContextCompat
 import cn.tsh520.cocjson.logic.TargetAppStore
 import cn.tsh520.cocjson.shizuku.ShizukuHelper
 import com.google.android.material.materialswitch.MaterialSwitch
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
 
@@ -21,9 +26,20 @@ class MainActivity : AppCompatActivity() {
     private lateinit var switchMonitor: MaterialSwitch
     private lateinit var targetInfo: TextView
     private lateinit var diagnoseResult: TextView
+    private lateinit var pollStatus: TextView
 
     private val notifPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { updateUi() }
+
+    private val uiTicker = Handler(Looper.getMainLooper())
+    private val timeFmt = SimpleDateFormat("HH:mm:ss", Locale.CHINA)
+
+    private val tickTask = object : Runnable {
+        override fun run() {
+            updatePollStatus()
+            uiTicker.postDelayed(this, 2000)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -33,6 +49,7 @@ class MainActivity : AppCompatActivity() {
         switchMonitor = findViewById(R.id.switch_monitor)
         targetInfo = findViewById(R.id.target_info)
         diagnoseResult = findViewById(R.id.diagnose_result)
+        pollStatus = findViewById(R.id.poll_status)
 
         val switchArchive = findViewById<MaterialSwitch>(R.id.switch_archive)
         val prefs = getSharedPreferences("config", MODE_PRIVATE)
@@ -56,7 +73,26 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btn_diagnose).setOnClickListener { diagnose() }
     }
 
-    override fun onResume() { super.onResume(); updateUi() }
+    override fun onResume() {
+        super.onResume()
+        updateUi()
+        uiTicker.removeCallbacks(tickTask)
+        uiTicker.post(tickTask)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        uiTicker.removeCallbacks(tickTask)
+    }
+
+    private fun updatePollStatus() {
+        pollStatus.text = if (CaptureService.running) {
+            val ago = (System.currentTimeMillis() - CaptureService.lastPollAt) / 1000
+            if (CaptureService.lastPollAt == 0L) "轮询状态：服务启动中…"
+            else if (ago <= 5) "轮询状态：正常（${timeFmt.format(Date(CaptureService.lastPollAt))}，${CaptureService.lastPollNote}）"
+            else "轮询状态：⚠️ ${ago} 秒没有活动——服务可能被系统杀掉了，请按「激活引导」第四步设置保活后重新开关一次监听"
+        } else "轮询状态：未开启"
+    }
 
     private fun startMonitor() {
         if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)

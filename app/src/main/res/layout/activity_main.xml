@@ -15,8 +15,12 @@
             android:id="@+id/switch_archive" android:layout_width="match_parent"
             android:layout_height="wrap_content" android:layout_marginTop="8dp" android:text="自动存档到 下载/村庄JSON" />
 
+        <TextView android:id="@+id/poll_status" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:layout_marginTop="12dp"
+            android:textSize="13sp" android:text="轮询状态：—" />
+
         <TextView android:id="@+id/target_info" android:layout_width="match_parent"
-            android:layout_height="wrap_content" android:layout_marginTop="24dp" android:textSize="16sp"
+            android:layout_height="wrap_content" android:layout_marginTop="12dp" android:textSize="16sp"
             android:text="自动打开：未设置" />
 
         <Button android:id="@+id/btn_pick" android:layout_width="match_parent"

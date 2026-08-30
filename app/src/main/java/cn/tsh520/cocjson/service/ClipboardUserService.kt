@@ -1,5 +1,6 @@
 package cn.tsh520.cocjson.service
 
+import android.content.ClipDescription
 import android.content.ClipData
 import android.os.Build
 import android.os.IBinder
@@ -11,7 +12,8 @@ import org.lsposed.hiddenapibypass.HiddenApiBypass
  * 主通道：裸 binder transact 调系统 IClipboard.getPrimaryClip（transaction code 2，
  * descriptor "android.content.IClipboard"），参数签名跨版本漂移用"候选列表探测"消化。
  * 备用通道：shell 身份执行 `service call clipboard` 并从 Parcel dump 还原文本。
- * shell 身份不受 Android 10+ 应用剪贴板限制。
+ * shell 身份不受 Android 10+ 应用剪贴板限制，但 binder 单次 reply 有 1MB 上限：
+ * 超大剪贴板内容会在读取时报 BadParcelableException（诊断可见）。
  */
 class ClipboardUserService : IClipboardUserService.Stub() {
 
@@ -50,11 +52,12 @@ class ClipboardUserService : IClipboardUserService.Stub() {
                     return null
                 }
             }
-            lastError = "全部直调模式失败"
+            lastError = if (lastError.contains(BIG_PARCEL_MARK)) "剪贴板内容超过1MB，binder无法回传"
+                        else "全部直调模式失败"
         } else {
             lastError = "clipboard binder 不存在"
         }
-        // 备用通道
+        // 备用通道（同样受 1MB 限制，超限时 extract 会失败）
         return serviceCallRead()?.also { lastError = "无（service call 通道）" }
     }
 
@@ -64,6 +67,8 @@ class ClipboardUserService : IClipboardUserService.Stub() {
         if (binder == null) {
             sb.append("clipboard binder 不存在（ServiceManager 反射失败）\n")
         } else {
+            // 先读"描述"（不含内容，不受 1MB 限制）：确认剪贴板里装的是什么
+            sb.append(readDescriptionDiag(binder)).append('\n')
             for ((mode, writer) in candidates()) {
                 val data = Parcel.obtain()
                 val reply = Parcel.obtain()
@@ -83,11 +88,37 @@ class ClipboardUserService : IClipboardUserService.Stub() {
         }
         try {
             val raw = serviceCallRaw()
-            sb.append("serviceCall: ").append(raw?.take(400) ?: "(无输出)")
+            sb.append("serviceCall: ").append(raw?.take(200) ?: "(无输出)")
         } catch (t: Throwable) {
             sb.append("serviceCall: ${t.javaClass.simpleName}: ${t.message?.take(150)}")
         }
         return sb.toString()
+    }
+
+    /** getPrimaryClipDescription（transaction 3）：返回剪贴板元信息，不携带内容体 */
+    private fun readDescriptionDiag(binder: IBinder): String {
+        val modes = if (lockedMode >= 0) listOf(lockedMode) + (candidates().keys - lockedMode)
+                    else candidates().keys.sorted()
+        for (mode in modes) {
+            val data = Parcel.obtain()
+            val reply = Parcel.obtain()
+            try {
+                data.writeInterfaceToken(DESCRIPTOR)
+                candidates().getValue(mode).invoke(data)
+                binder.transact(TRANSACTION_GET_PRIMARY_CLIP_DESC, data, reply, 0)
+                reply.readException()
+                val desc = if (Build.VERSION.SDK_INT >= 30) reply.readTypedObject(ClipDescription.CREATOR)
+                           else if (reply.readInt() != 0) ClipDescription.CREATOR.createFromParcel(reply) else null
+                if (desc != null) {
+                    val mimes = (0 until desc.mimeTypeCount).joinToString(",") { desc.getMimeType(it) }
+                    val extra = runCatching { desc.extras?.toString() ?: "" }.getOrDefault("")
+                    return "描述mode=$mode: label=${desc.label?.take(40)} mime=$mimes extra=${extra.take(120)}"
+                }
+            } catch (t: Throwable) {
+                // 换下一个模式继续
+            } finally { data.recycle(); reply.recycle() }
+        }
+        return "描述: 所有模式均未取得（可能被拒或签名不符）"
     }
 
     override fun destroy() { /* Shizuku UserService 规范要求的空实现 */ }
@@ -190,8 +221,10 @@ class ClipboardUserService : IClipboardUserService.Stub() {
     private companion object {
         const val DESCRIPTOR = "android.content.IClipboard"
         const val TRANSACTION_GET_PRIMARY_CLIP = 2 // FIRST_CALL_TRANSACTION + 1
+        const val TRANSACTION_GET_PRIMARY_CLIP_DESC = 3
         const val PKG = "com.android.shell" // shell uid 下被系统放行的调用方标识
         const val JSON_START = "{\"tag\""
+        const val BIG_PARCEL_MARK = "above allowed limit"
         val WORD_RE = Regex("""[0-9a-fA-F]{8}""")
     }
 }

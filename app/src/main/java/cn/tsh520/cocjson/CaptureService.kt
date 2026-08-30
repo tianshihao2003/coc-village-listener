@@ -30,6 +30,9 @@ class CaptureService : Service() {
 
     companion object {
         @Volatile var running = false; private set
+        /** 轮询状态（主界面展示用）：最后一次轮询时间戳与备注 */
+        @Volatile var lastPollAt: Long = 0L
+        @Volatile var lastPollNote: String = "尚未开始"
         private const val CHANNEL_MONITOR = "monitor"
         private const val CHANNEL_CAPTURE = "capture"
         private const val FOREGROUND_ID = 1
@@ -73,11 +76,21 @@ class CaptureService : Service() {
     private suspend fun pollLoop() {
         while (scope.isActive) {
             delay(POLL_MS)
-            val raw = readViaShizuku() ?: continue
-            val snap = JsonMatcher.match(raw) ?: continue
+            lastPollAt = System.currentTimeMillis()
+            val raw = readViaShizuku()
+            if (raw == null) {
+                lastPollNote = "本轮未读到（Shizuku 未授权或读取失败）"
+                continue
+            }
+            val snap = JsonMatcher.match(raw)
+            if (snap == null) {
+                lastPollNote = "读到 ${raw.length} 字符非村庄数据"
+                continue
+            }
             val fp = JsonMatcher.fingerprint(snap.raw)
-            if (fp == lastFingerprint) continue
+            if (fp == lastFingerprint) { lastPollNote = "已捕获过 ${snap.tag}"; continue }
             lastFingerprint = fp
+            lastPollNote = "捕获 ${snap.tag}（${snap.raw.length} 字符）"
             handleCapture(snap)
         }
     }

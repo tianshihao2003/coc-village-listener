@@ -7,12 +7,14 @@ import java.security.MessageDigest
 data class VillageSnapshot(val tag: String, val buildingsCount: Int, val raw: String)
 
 object JsonMatcher {
-    private val TAG_PREFIX = Regex("""^\{\s*"tag"\s*:\s*"#[0-9A-Z]+"""")
+    // tag 不要求是第一个键，只要求出现在开头附近（兼容键序变化/BOM/前导空白）
+    private val TAG_HINT = Regex("""\{\s*"tag"\s*:\s*"#[0-9A-Z]+"""")
 
     fun match(raw: String?): VillageSnapshot? {
         if (raw.isNullOrBlank()) return null
-        val s = raw.trim()
-        if (!TAG_PREFIX.containsMatchIn(s)) return null
+        var s = raw.trim()
+        if (s.startsWith('\uFEFF')) s = s.substring(1).trim()
+        if (!TAG_HINT.containsMatchIn(s.take(256))) return null
         val root = runCatching { JSONTokener(s).nextValue() as? JSONObject }.getOrNull() ?: return null
         val tag = root.optString("tag", "")
         if (!tag.startsWith("#")) return null
