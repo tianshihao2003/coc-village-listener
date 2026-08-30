@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">村庄JSON监听</string>
+    <string name="guide_title">激活引导</string>
+    <string name="picker_title">选择要自动打开的软件</string>
+</resources>
